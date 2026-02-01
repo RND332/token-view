@@ -64,49 +64,47 @@ const getSankeyData = createServerFn({ method: 'GET' }).handler(async () => {
         const rows = db
             .query(
                 `
-                WITH hourly AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:00', timestamp, 'unixepoch') AS hour,
-                        from_addr,
-                        to_addr,
-                        SUM(value * 1.0) AS amount
-                    FROM transfers
-                    GROUP BY hour, from_addr, to_addr
+                WITH daily AS (
+                  SELECT
+                    date(timestamp, 'unixepoch') AS day,
+                    from_addr,
+                    to_addr,
+                    SUM(value * 1.0) AS amount
+                  FROM transfers
+                  GROUP BY day, from_addr, to_addr
                 )
-                SELECT hour, from_addr, to_addr, amount
-                FROM hourly
+                SELECT day, from_addr, to_addr, amount
+                FROM daily
                 WHERE amount != 0
-                ORDER BY hour
+                ORDER BY day
             `,
             )
-            .all() as { hour: string; from_addr: string; to_addr: string; amount: number }[]
+              .all() as { day: string; from_addr: string; to_addr: string; amount: number }[]
 
         const nodesMap = new Map<
             string,
-            { id: string; addr: string; day: string; hour: string; label: string }
+              { id: string; addr: string; day: string; label: string }
         >()
-        const links: { source: string; target: string; value: number; day: string }[] = []
+            const links: { source: string; target: string; value: number; day: string }[] = []
 
         for (const row of rows) {
-            const sourceId = `${row.hour}-${row.from_addr}`
-            const targetId = `${row.hour}-${row.to_addr}`
+              const sourceId = `${row.day}-${row.from_addr}`
+              const targetId = `${row.day}-${row.to_addr}`
 
             if (!nodesMap.has(sourceId)) {
                 nodesMap.set(sourceId, {
                     id: sourceId,
                     addr: row.from_addr,
-                    day: row.hour,
-                    hour: row.hour,
-                    label: `${row.hour} – ${row.from_addr}`,
+                  day: row.day,
+                  label: `${row.day} – ${row.from_addr}`,
                 })
             }
             if (!nodesMap.has(targetId)) {
                 nodesMap.set(targetId, {
                     id: targetId,
                     addr: row.to_addr,
-                    day: row.hour,
-                    hour: row.hour,
-                    label: `${row.hour} – ${row.to_addr}`,
+                  day: row.day,
+                  label: `${row.day} – ${row.to_addr}`,
                 })
             }
 
@@ -114,7 +112,7 @@ const getSankeyData = createServerFn({ method: 'GET' }).handler(async () => {
                 source: sourceId,
                 target: targetId,
                 value: row.amount,
-                day: row.hour,
+                day: row.day,
             })
         }
 
@@ -138,7 +136,7 @@ export const Route = createFileRoute('/holders')({
 function Holders() {
   const data = Route.useLoaderData() as {
     holderSeries: HolderPoint[]
-    sankeyData: { nodes: { id: string; addr: string; hour: string; label: string }[]; links: { source: string; target: string; value: number; hour: string }[] }
+    sankeyData: { nodes: { id: string; addr: string; day: string; label: string }[]; links: { source: string; target: string; value: number; day: string }[] }
   }
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -276,137 +274,133 @@ function Holders() {
           )}
         </section>
       </main>
-    <section className="mx-auto flex flex-col gap-3 px-3 pb-8">
+    <section className="mx-auto flex max-w-5xl flex-col gap-3 px-3 pb-8">
       <header className="flex flex-col gap-1">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Transfers</p>
-        <h2 className="text-lg font-semibold text-slate-900">Sankey timeline</h2>
-        <p className="text-sm text-slate-600">Hourly transfer flows between addresses.</p>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Flows</p>
+        <h2 className="text-lg font-semibold text-slate-900">Sankey timeline (daily)</h2>
+        <p className="text-sm text-slate-600">Latest daily snapshots of value moving between addresses.</p>
       </header>
 
-      {data.sankeyData.links.length === 0 ? (
-        <p className="text-sm text-slate-600">No transfer data available.</p>
-      ) : (
-        <HourlySankey data={data.sankeyData} />
-      )}
+    {(() => {
+      type SankeyNode = { id: string; addr: string; day: string; label: string }
+      type SankeyLink = { source: string; target: string; value: number; day: string }
+
+      const linkDay = (l: SankeyLink) => l.day ?? 'unknown'
+      const grouped = d3.group<SankeyLink, string>(data.sankeyData.links, linkDay)
+      const days = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b))
+      const palette = d3.scaleOrdinal<string, string>(d3.schemeTableau10)
+      const width = 880
+      const baseHeight = 180
+      const heightPerNode = 8
+      const heightPerLink = 2
+
+      if (days.length === 0) {
+        return <p className="text-sm text-slate-600">No flow data available.</p>
+      }
+
+      return (
+        <div className="flex flex-col gap-4">
+        {days.map((day: string) => {
+          const dayLinks = grouped.get(day) ?? []
+          if (dayLinks.length === 0) return null
+
+          const nodeIds = new Set<string>()
+          dayLinks.forEach((l: SankeyLink) => {
+            nodeIds.add(String(l.source))
+            nodeIds.add(String(l.target))
+          })
+          const dayNodes = data.sankeyData.nodes.filter((n) => nodeIds.has(n.id))
+
+          const dynamicHeight = Math.max(
+            baseHeight,
+            baseHeight + dayNodes.length * heightPerNode + dayLinks.length * heightPerLink,
+          )
+
+          const sankeyGen = sankeyCircular<SankeyNode, SankeyLink>()
+            .nodeId((d) => d.id)
+            .nodeWidth(10)
+            .nodePadding(12)
+            .extent([
+            [0, 0],
+            [width, dynamicHeight],
+            ])
+
+          const graph = sankeyGen({
+            nodes: dayNodes.map((n) => ({ ...n })),
+            links: dayLinks.map((l) => ({ ...l })),
+          })
+
+          const linkPath = (link: any) => {
+            const x0 = link.source.x1
+            const x1 = link.target.x0
+            const y0 = link.y0
+            const y1 = link.y1
+            const xi = d3.interpolateNumber(x0, x1)
+            const x2 = xi(0.5)
+            const x3 = xi(0.5)
+            return `M${x0},${y0}C${x2},${y0} ${x3},${y1} ${x1},${y1}`
+          }
+
+          return (
+            <figure
+            key={day}
+            className="overflow-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+            >
+            <figcaption className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Snapshot
+                </p>
+                <p className="text-sm font-semibold text-slate-800">{day}</p>
+              </div>
+              <p className="text-xs text-slate-500">
+                {dayNodes.length} addresses · {dayLinks.length} links
+              </p>
+            </figcaption>
+            <svg width={width} height={dynamicHeight} role="presentation">
+              <g>
+                {(graph.links as any[]).map((link, idx) => (
+                <path
+                  key={`${link.source.id}-${link.target.id}-${idx}`}
+                  d={linkPath(link)}
+                  stroke="rgba(14,165,233,0.35)"
+                  strokeWidth={Math.max(1, link.width || 1)}
+                  fill="none"
+                  opacity={0.9}
+                >
+                  <title>{`${link.source.addr} → ${link.target.addr} · ${link.value}`}</title>
+                </path>
+                ))}
+                {(graph.nodes as any[]).map((node) => (
+                <g key={node.id} transform={`translate(${node.x0},${node.y0})`}>
+                  <rect
+                    width={Math.max(2, node.x1 - node.x0)}
+                    height={Math.max(2, node.y1 - node.y0)}
+                    fill={palette(node.addr)}
+                    rx={2}
+                    ry={2}
+                  />
+                  <text
+                    x={Math.max(2, node.x1 - node.x0) + 6}
+                    y={(node.y1 - node.y0) / 2}
+                    dy="0.35em"
+                    fontSize={11}
+                    fill="#334155"
+                  >
+                    {node.addr.slice(0, 12)}
+                  </text>
+                </g>
+                ))}
+              </g>
+            </svg>
+            </figure>
+          )
+        })}
+        </div>
+      )
+    })()}
     </section>
     </div>
   )
 }
-
-function HourlySankey({
-  data,
-}: {
-  data: { nodes: { id: string; addr: string; hour: string; label: string }[]; links: { source: string; target: string; value: number; hour: string }[] }
-}) {
-  const prepared = useMemo(() => {
-    const nodes = data.nodes.map((n) => ({ ...n, name: n.label ?? n.id }))
-    const links = data.links
-      .filter((l) => l.source && l.target && l.source !== l.target)
-      .map((l) => ({ ...l, value: Math.max(0.0001, Number(l.value) || 0) }))
-
-    const hours = Array.from(new Set(nodes.map((d) => d.hour))).sort()
-    const idToIndex = new Map<string, number>()
-    nodes.forEach((n, idx) => idToIndex.set(n.id, idx))
-
-    const indexedLinks = links
-      .map((l) => ({
-        source: idToIndex.get(l.source) ?? -1,
-        target: idToIndex.get(l.target) ?? -1,
-        value: l.value,
-        hour: l.hour,
-      }))
-      .filter((l) => l.source >= 0 && l.target >= 0)
-
-    return { nodes, links: indexedLinks, hours }
-  }, [data])
-
-  const margin = { top: 24, right: 24, bottom: 32, left: 24 }
-  const innerWidth = useMemo(() => Math.max(900, Math.min(2400, 220 + prepared.hours.length * 120)), [prepared.hours.length])
-  const innerHeight = 640
-  const width = innerWidth + margin.left + margin.right
-  const height = innerHeight + margin.top + margin.bottom
-
-  const graph = useMemo(() => {
-    const nodes = prepared.nodes.map((n) => ({ ...n }))
-    const links = prepared.links.map((l) => ({ ...l }))
-
-    const hourIndex = new Map<string, number>()
-    prepared.hours.forEach((h, i) => hourIndex.set(h, i))
-
-    const sankey = sankeyCircular()
-      .nodeId((d: any) => d.id)
-      .nodeWidth(14)
-      .nodePadding(24)
-      .nodeAlign((d: any) => hourIndex.get(d.hour) ?? 0)
-      .size([innerWidth, innerHeight])
-      .circularLinkGap(6)
-
-    return sankey({ nodes, links })
-  }, [prepared, innerWidth, innerHeight])
-
-  const color = useMemo(() => d3.scaleOrdinal(d3.schemeTableau10), [])
-
-  return (
-    <div className="overflow-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <svg width={width} height={height} role="img" aria-label="Sankey timeline of transfers">
-        <g transform={`translate(${margin.left},${margin.top})`}>
-          <g fill="none" strokeOpacity={0.25}>
-            {graph.links.map((link: any, i: number) => (
-              <path
-                key={`${link.source.id}-${link.target.id}-${i}`}
-                stroke={color((link as any).source.addr)}
-                strokeWidth={Math.max(1, link.width)}
-              />
-            ))}
-          </g>
-
-          <g>
-            {graph.nodes.map((node: any) => (
-              <g key={node.id} transform={`translate(${node.x0},${node.y0})`}>
-                <rect
-                  width={node.x1 - node.x0}
-                  height={Math.max(4, node.y1 - node.y0)}
-                  fill={color(node.addr)}
-                  rx={2}
-                />
-                <title>{`${node.label}`}</title>
-                <text
-                  x={(node.x1 - node.x0) + 6}
-                  y={(node.y1 - node.y0) / 2}
-                  dy="0.35em"
-                  fontSize={11}
-                  fill="#0f172a"
-                >
-                  {node.addr.slice(0, 6)}…{node.addr.slice(-4)}
-                </text>
-              </g>
-            ))}
-          </g>
-
-          <g>
-            {prepared.hours.map((h, idx) => {
-              const span = prepared.hours.length > 1 ? innerWidth / (prepared.hours.length - 1) : 0
-              const x = idx * span
-              return (
-                <g key={h}>
-                  <line x1={x} y1={-4} x2={x} y2={innerHeight + 4} stroke="#e2e8f0" strokeWidth={1} />
-                  <text
-                    x={x}
-                    y={innerHeight + 10}
-                    textAnchor="middle"
-                    fontSize={11}
-                    fill="#475569"
-                  >
-                    {h.slice(11, 16)}
-                  </text>
-                </g>
-              )
-            })}
-          </g>
-        </g>
-      </svg>
-    </div>
-  )
-}
-
 
