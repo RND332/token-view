@@ -7,9 +7,11 @@ import handlerModule from './dist/server/server.js'
 
 const port = process.env.PORT || 4173
 const clientDir = resolve('dist/client')
-const handler = handlerModule?.fetch ?? handlerModule?.default?.fetch ?? handlerModule.default ?? handlerModule
 
-if (typeof handler?.fetch !== 'function') {
+const handlerObj = handlerModule?.default ?? handlerModule
+const handlerFetch = typeof handlerObj?.fetch === 'function' ? handlerObj.fetch.bind(handlerObj) : typeof handlerObj === 'function' ? handlerObj : null
+
+if (typeof handlerFetch !== 'function') {
   console.error('Invalid server handler: missing fetch()')
   process.exit(1)
 }
