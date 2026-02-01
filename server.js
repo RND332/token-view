@@ -62,7 +62,7 @@ createServer(async (req, res) => {
       body,
     })
 
-    const response = await handler.fetch(request)
+    const response = await handlerFetch(request)
     res.statusCode = response.status
     response.headers.forEach((value, key) => res.setHeader(key, value))
 
