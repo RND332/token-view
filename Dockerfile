@@ -8,7 +8,7 @@ RUN bun install
 
 # Copy source and build
 COPY . .
-RUN bun run build
+RUN bun --bun run build
 
 # Production image: Bun runtime serving SSR + static assets
 FROM oven/bun:1.1 AS runtime
